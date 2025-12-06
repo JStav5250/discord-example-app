@@ -29,7 +29,7 @@ const SCHEDULED_POST_COMMAND = {
       name: "interval_days",
       description: "Number of days between posts",
       required: true,
-      min_value: 1,
+      min_value: 0,
     },
     {
       type: 3, // string
