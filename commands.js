@@ -1,23 +1,8 @@
 import 'dotenv/config';
-import { getRPSChoices } from './game.js';
-import { capitalize, InstallGlobalCommands } from './utils.js';
+import { InstallGlobalCommands } from './utils.js';
 
-// Get the game choices from game.js
-function createCommandChoices() {
-  const choices = getRPSChoices();
-  const commandChoices = [];
 
-  for (let choice of choices) {
-    commandChoices.push({
-      name: capitalize(choice),
-      value: choice.toLowerCase(),
-    });
-  }
 
-  return commandChoices;
-}
-
-// Simple test command
 const TEST_COMMAND = {
   name: 'test',
   description: 'Basic command',
@@ -26,24 +11,41 @@ const TEST_COMMAND = {
   contexts: [0, 1, 2],
 };
 
-// Command containing options
-const CHALLENGE_COMMAND = {
-  name: 'challenge',
-  description: 'Challenge to a match of rock paper scissors',
-  options: [
-    {
-      type: 3,
-      name: 'object',
-      description: 'Pick your object',
-      required: true,
-      choices: createCommandChoices(),
-    },
-  ],
+const SCHEDULED_POST_COMMAND = {
+  name: "scheduled_post",
+  description: "Schedules a post",
   type: 1,
   integration_types: [0, 1],
-  contexts: [0, 2],
+  contexts: [0, 1, 2],
+  options: [
+    {
+      type: 3, // string
+      name: "text",
+      description: "Text of the message to post",
+      required: true,
+    },
+    {
+      type: 4, // interger
+      name: "interval_days",
+      description: "Number of days between posts",
+      required: true,
+      min_value: 1,
+    },
+    {
+      type: 3, // string
+      name: "time",
+      description: "Time of day (HH:MM 24h, server time)",
+      required: true,
+    },
+    {
+      type: 7, // channel
+      name: "target_channel",
+      description: "Channel where the message will be posted",
+      required: false, // optional; defaults to the current channel
+    },
+  ],
 };
 
-const ALL_COMMANDS = [TEST_COMMAND, CHALLENGE_COMMAND];
+const ALL_COMMANDS = [TEST_COMMAND, SCHEDULED_POST_COMMAND];
 
 InstallGlobalCommands(process.env.APP_ID, ALL_COMMANDS);
