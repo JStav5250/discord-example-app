@@ -6,7 +6,10 @@ import {
   verifyKeyMiddleware,
 } from "discord-interactions";
 import { handleTestCommand } from "./testCommand.js";
-import { handleScheduledPostCommand } from "./scheduledPostCommand.js";
+import {
+  handleScheduledPostCommand,
+  handleScheduledPostModalSubmit,
+} from "./scheduledPostCommand.js";
 
 // Create an express app
 const app = express();
@@ -37,7 +40,7 @@ app.post(
         return res.send(response);
       }
 
-      // /repost
+      // /scheduled_post  -> opens the modal
       if (name === "scheduled_post") {
         const response = await handleScheduledPostCommand(req.body);
         return res.send(response);
@@ -45,6 +48,20 @@ app.post(
 
       console.error(`unknown command: ${name}`);
       return res.status(400).json({ error: "unknown command" });
+    }
+
+    // 3) Modal submit interactions (when user submits the scheduled_post modal)
+    if (type === InteractionType.MODAL_SUBMIT) {
+      const { custom_id } = data ?? {};
+
+      // Our scheduled post modal
+      if (custom_id && custom_id.startsWith("scheduled_post_modal|")) {
+        const response = await handleScheduledPostModalSubmit(req.body);
+        return res.send(response);
+      }
+
+      console.error(`unknown modal submit: ${custom_id}`);
+      return res.status(400).json({ error: "unknown modal submit" });
     }
 
     console.error("unknown interaction type", type);

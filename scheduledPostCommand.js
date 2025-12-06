@@ -11,26 +11,31 @@ const scheduledPosts = [];
 // Helpers
 // ---------------------------------------------------------
 
-// Allow you to type "\n" in the command and get real newlines in the message.
+// Allow you to type "\n" (if you ever still use text option) and get real newlines in the message.
 function normalizeText(raw) {
   if (typeof raw !== "string") return raw;
   // "\\n" in the string → actual newline
   return raw.replace(/\\n/g, "\n");
 }
 
-function getOptionValues(options, channel_id) {
-  const textOpt = options.find((o) => o.name === "text");
+/**
+ * Read options for the schedule (no text here – text will come from the modal).
+ * Expected slash options:
+ *   interval_days  (INTEGER, required, >= 0)
+ *   time           (STRING, required)
+ *   target_channel (CHANNEL, optional, defaults to current channel)
+ */
+function getScheduleOptions(options, channel_id) {
   const intervalDaysOpt = options.find((o) => o.name === "interval_days");
   const timeOpt = options.find((o) => o.name === "time");
   const targetChannelOpt = options.find((o) => o.name === "target_channel");
 
-  const text = textOpt?.value;
   const intervalDays =
     intervalDaysOpt?.value !== undefined ? Number(intervalDaysOpt.value) : NaN;
   const timeString = timeOpt?.value;
   const targetChannelId = targetChannelOpt?.value || channel_id;
 
-  return { text, intervalDays, timeString, targetChannelId };
+  return { intervalDays, timeString, targetChannelId };
 }
 
 function parseTimeString(timeStr) {
@@ -71,7 +76,7 @@ function validateOptionValues({ text, intervalDays, timeString }) {
       data: {
         flags: InteractionResponseFlags.EPHEMERAL,
         content:
-          "You must provide some text to post. Usage: `/scheduled_post text:<text> interval_days:<days> time:<HH:MM> [target_channel]` (time in Eastern Time).",
+          "You must provide some text to post. Usage: `/scheduled_post interval_days:<days> time:<HH:MM> [target_channel]` then fill in the modal (time in Eastern Time).",
       },
     };
   }
@@ -176,7 +181,7 @@ function schedulePostJob({
   intervalMs,
   targetChannelId,
   text,
-  channel_id, // source channel (where command was run)
+  channel_id, // source channel (where command / modal was run)
   intervalDays,
   timeString,
 }) {
@@ -217,27 +222,117 @@ function schedulePostJob({
 }
 
 /**
+ * Build the modal that asks the user for the message text.
+ * We encode intervalDays/timeString/targetChannelId into custom_id so we can
+ * get them back on submit.
+ */
+function buildScheduledPostModal({ intervalDays, timeString, targetChannelId }) {
+  const customId = `scheduled_post_modal|${intervalDays}|${timeString}|${targetChannelId}`;
+
+  return {
+    type: InteractionResponseType.MODAL,
+    data: {
+      custom_id: customId,
+      title: "Create Scheduled Post",
+      components: [
+        {
+          type: 1, // ACTION_ROW
+          components: [
+            {
+              type: 4, // TEXT_INPUT
+              custom_id: "scheduled_post_text",
+              style: 2, // PARAGRAPH = multi-line
+              label: "Message to schedule",
+              min_length: 1,
+              max_length: 2000,
+              required: true,
+              placeholder:
+                "Type your Discord message here.\nMarkdown and line breaks are supported.",
+            },
+          ],
+        },
+      ],
+    },
+  };
+}
+
+// ---------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------
+
+/**
  * Handler for the /scheduled_post command.
+ *
+ * Now this DOES NOT schedule immediately.
+ * Instead it:
+ *  1) reads interval_days, time, target_channel
+ *  2) validates them
+ *  3) returns a MODAL so you can type/preview the message with real line breaks.
+ *
  * Example:
- *   /scheduled_post text:"Line 1\\nLine 2" interval_days:7 time:19:30
- *   → posts with an actual line break between Line 1 and Line 2.
+ *   /scheduled_post interval_days:7 time:19:30 target_channel:#scrims
  */
 export async function handleScheduledPostCommand(interaction) {
   const { data, channel_id } = interaction;
   const { options = [] } = data ?? {};
 
-  // 1. Read raw options from Discord
-  const {
-    text: rawText,
+  // 1. Read schedule options (no text here)
+  const { intervalDays, timeString, targetChannelId } = getScheduleOptions(
+    options,
+    channel_id
+  );
+
+  // 2. Basic validation for interval/time using a dummy non-empty text
+  const validationResult = validateOptionValues({
+    text: "placeholder", // we only care about intervalDays/timeString here
+    intervalDays,
+    timeString,
+  });
+
+  if (validationResult && validationResult.type && validationResult.data) {
+    // It's an error response
+    return validationResult;
+  }
+
+  // 3. Return a modal asking for the actual message text
+  return buildScheduledPostModal({
     intervalDays,
     timeString,
     targetChannelId,
-  } = getOptionValues(options, channel_id);
+  });
+}
 
-  // 2. Normalize text (interpret "\n" as real newlines)
+/**
+ * Handler for the modal submit (when the user clicks "Submit" on the popup).
+ * This is where we actually schedule the job using the text they typed.
+ */
+export async function handleScheduledPostModalSubmit(interaction) {
+  const { data, channel_id } = interaction;
+  const { custom_id, components } = data;
+
+  // custom_id format: scheduled_post_modal|intervalDays|timeString|targetChannelId
+  if (!custom_id.startsWith("scheduled_post_modal|")) {
+    return {
+      type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+      data: {
+        flags: InteractionResponseFlags.EPHEMERAL,
+        content: "Unknown modal.",
+      },
+    };
+  }
+
+  const [, intervalStr, timeString, targetChannelId] = custom_id.split("|");
+  const intervalDays = Number(intervalStr);
+
+  // Modal text value is nested: components[0].components[0].value
+  const textInputRow = components[0];
+  const textInput = textInputRow.components[0];
+  const rawText = textInput.value;
+
+  // Normalize in case you ever type "\n" literally, but real newlines from the modal just work
   const text = normalizeText(rawText);
 
-  // 3. Basic validation
+  // Validate with real text this time
   const validationResult = validateOptionValues({
     text,
     intervalDays,
@@ -250,7 +345,6 @@ export async function handleScheduledPostCommand(interaction) {
 
   const { hour, minute } = validationResult;
 
-  // 4. Calculate timings
   const { initialDelayMs, intervalMs } = calculateTimings(
     hour,
     minute,
@@ -267,7 +361,6 @@ export async function handleScheduledPostCommand(interaction) {
     text
   );
 
-  // 5. Schedule the job (first run + maybe repeats)
   schedulePostJob({
     initialDelayMs,
     intervalMs,
@@ -278,7 +371,6 @@ export async function handleScheduledPostCommand(interaction) {
     timeString,
   });
 
-  // 6. Return an ephemeral acknowledgement
   return {
     type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
     data: {

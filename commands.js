@@ -19,12 +19,6 @@ const SCHEDULED_POST_COMMAND = {
   contexts: [0, 1, 2],
   options: [
     {
-      type: 3, // string
-      name: "text",
-      description: "Text of the message to post",
-      required: true,
-    },
-    {
       type: 4, // interger
       name: "interval_days",
       description: "Number of days between posts",
