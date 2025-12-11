@@ -11,33 +11,16 @@ const scheduledPosts = [];
 // Helpers
 // ---------------------------------------------------------
 
-// Allow you to type "\n" (if you ever still use text option) and get real newlines in the message.
+// Allow you to type "\\n" literally and get real newlines.
 function normalizeText(raw) {
   if (typeof raw !== "string") return raw;
-  // "\\n" in the string → actual newline
   return raw.replace(/\\n/g, "\n");
 }
 
 /**
- * Read options for the schedule (no text here – text will come from the modal).
- * Expected slash options:
- *   interval_days  (INTEGER, required, >= 0)
- *   time           (STRING, required)
- *   target_channel (CHANNEL, optional, defaults to current channel)
+ * Parse "HH:MM" 24-hour time.
+ * Returns { hour, minute } on success, or null on failure.
  */
-function getScheduleOptions(options, channel_id) {
-  const intervalDaysOpt = options.find((o) => o.name === "interval_days");
-  const timeOpt = options.find((o) => o.name === "time");
-  const targetChannelOpt = options.find((o) => o.name === "target_channel");
-
-  const intervalDays =
-    intervalDaysOpt?.value !== undefined ? Number(intervalDaysOpt.value) : NaN;
-  const timeString = timeOpt?.value;
-  const targetChannelId = targetChannelOpt?.value || channel_id;
-
-  return { intervalDays, timeString, targetChannelId };
-}
-
 function parseTimeString(timeStr) {
   if (!timeStr) return null;
   const match = timeStr.trim().match(/^(\d{1,2}):(\d{2})$/);
@@ -61,46 +44,69 @@ function parseTimeString(timeStr) {
 }
 
 /**
- * Validate the basic option values.
- * On error: returns a complete interaction response object.
- * On success: returns { hour, minute }.
- *
- * NOTE: Times are interpreted in the local timezone of the machine
- * (you said EST, so your OS should be set to Eastern Time).
+ * Parse interval_days from a string.
+ * Must be an integer >= 0.
  */
-function validateOptionValues({ text, intervalDays, timeString }) {
-  // Missing or empty text
+function parseIntervalDays(raw) {
+  if (raw == null) return NaN;
+  const n = Number(String(raw).trim());
+  if (!Number.isInteger(n) || n < 0) return NaN;
+  return n;
+}
+
+/**
+ * Get a text input value from modal components by custom_id.
+ */
+function getTextInputValue(components, wantedId) {
+  if (!Array.isArray(components)) return undefined;
+
+  for (const row of components) {
+    const rowComponents = row.components || [];
+    for (const input of rowComponents) {
+      if (input?.custom_id === wantedId) {
+        return input.value;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Validate values coming from the modal:
+ *  - text (message content)
+ *  - intervalDaysStr (string)
+ *  - timeString
+ *
+ * On error: returns a full interaction response (ephemeral).
+ * On success: returns { intervalDays, hour, minute }.
+ */
+function validateModalValues({ text, intervalDaysStr, timeString }) {
+  // Text
   if (!text || typeof text !== "string" || text.trim() === "") {
     return {
       type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
       data: {
         flags: InteractionResponseFlags.EPHEMERAL,
         content:
-          "You must provide some text to post. Usage: `/scheduled_post interval_days:<days> time:<HH:MM> [target_channel]` then fill in the modal (time in Eastern Time).",
+          "You must provide some text to post in the modal. The message cannot be empty.",
       },
     };
   }
 
-  // interval_days:
-  //  - integer >= 1  → repeat every N days
-  //  - integer === 0 → one-time post at the next occurrence of that time
-  if (
-    intervalDays === undefined ||
-    Number.isNaN(intervalDays) ||
-    !Number.isInteger(intervalDays) ||
-    intervalDays < 0
-  ) {
+  // interval_days
+  const intervalDays = parseIntervalDays(intervalDaysStr);
+  if (Number.isNaN(intervalDays)) {
     return {
       type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
       data: {
         flags: InteractionResponseFlags.EPHEMERAL,
         content:
-          "interval_days must be an integer >= 0. Use 0 to post once at the chosen time.",
+          '"Interval (days)" must be an integer >= 0. Use 0 to post once at the chosen time.',
       },
     };
   }
 
-  // Missing/invalid time
+  // time
   if (!timeString) {
     return {
       type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
@@ -125,7 +131,7 @@ function validateOptionValues({ text, intervalDays, timeString }) {
   }
 
   const { hour, minute } = parsedTime;
-  return { hour, minute };
+  return { intervalDays, hour, minute };
 }
 
 /**
@@ -202,7 +208,6 @@ function schedulePostJob({
       console.error("Error during first scheduled post:", err);
     }
 
-    // Only create a repeating interval if intervalMs > 0 (interval_days > 0)
     if (intervalMs > 0) {
       job.intervalId = setInterval(async () => {
         try {
@@ -212,7 +217,6 @@ function schedulePostJob({
         }
       }, intervalMs);
     } else {
-      // one-time job: no repeats; you could also remove it from scheduledPosts here if you want
       job.timeoutId = null;
     }
   }, initialDelayMs);
@@ -221,13 +225,17 @@ function schedulePostJob({
   return job;
 }
 
+// ---------------------------------------------------------
+// Modal builder
+// ---------------------------------------------------------
+
 /**
- * Build the modal that asks the user for the message text.
- * We encode intervalDays/timeString/targetChannelId into custom_id so we can
- * get them back on submit.
+ * Modal: interval_days + time + message text.
+ * targetChannelId is *not* editable here, it’s passed via custom_id.
  */
-function buildScheduledPostModal({ intervalDays, timeString, targetChannelId }) {
-  const customId = `scheduled_post_modal|${intervalDays}|${timeString}|${targetChannelId}`;
+function buildScheduledPostModal({ targetChannelId }) {
+  // IMPORTANT: prefix is "scheduled_post_modal|" to match typical routing
+  const customId = `scheduled_post_modal|${targetChannelId}`;
 
   return {
     type: InteractionResponseType.MODAL,
@@ -240,8 +248,38 @@ function buildScheduledPostModal({ intervalDays, timeString, targetChannelId }) 
           components: [
             {
               type: 4, // TEXT_INPUT
+              custom_id: "interval_days_input",
+              style: 1, // SHORT
+              label: "Interval (days, 0 for one-time)",
+              min_length: 1,
+              max_length: 4,
+              required: true,
+              placeholder: "e.g. 0 or 7",
+            },
+          ],
+        },
+        {
+          type: 1,
+          components: [
+            {
+              type: 4,
+              custom_id: "time_input",
+              style: 1, // SHORT
+              label: "Time (HH:MM, 24-hour, Eastern Time)",
+              min_length: 4,
+              max_length: 5,
+              required: true,
+              placeholder: "e.g. 19:30",
+            },
+          ],
+        },
+        {
+          type: 1,
+          components: [
+            {
+              type: 4,
               custom_id: "scheduled_post_text",
-              style: 2, // PARAGRAPH = multi-line
+              style: 2, // PARAGRAPH
               label: "Message to schedule",
               min_length: 1,
               max_length: 2000,
@@ -261,57 +299,34 @@ function buildScheduledPostModal({ intervalDays, timeString, targetChannelId }) 
 // ---------------------------------------------------------
 
 /**
- * Handler for the /scheduled_post command.
+ * /scheduled_post command:
  *
- * Now this DOES NOT schedule immediately.
- * Instead it:
- *  1) reads interval_days, time, target_channel
- *  2) validates them
- *  3) returns a MODAL so you can type/preview the message with real line breaks.
- *
- * Example:
- *   /scheduled_post interval_days:7 time:19:30 target_channel:#scrims
+ *  - Optional slash option: target_channel (CHANNEL)
+ *  - interval_days + time + text are collected in the modal.
  */
 export async function handleScheduledPostCommand(interaction) {
   const { data, channel_id } = interaction;
   const { options = [] } = data ?? {};
 
-  // 1. Read schedule options (no text here)
-  const { intervalDays, timeString, targetChannelId } = getScheduleOptions(
-    options,
-    channel_id
-  );
+  // Only option: target_channel (optional)
+  const targetChannelOpt = options.find((o) => o.name === "target_channel");
+  const targetChannelId = targetChannelOpt?.value || channel_id;
 
-  // 2. Basic validation for interval/time using a dummy non-empty text
-  const validationResult = validateOptionValues({
-    text: "placeholder", // we only care about intervalDays/timeString here
-    intervalDays,
-    timeString,
-  });
-
-  if (validationResult && validationResult.type && validationResult.data) {
-    // It's an error response
-    return validationResult;
-  }
-
-  // 3. Return a modal asking for the actual message text
-  return buildScheduledPostModal({
-    intervalDays,
-    timeString,
-    targetChannelId,
-  });
+  // Open the modal; all other data is collected there
+  return buildScheduledPostModal({ targetChannelId });
 }
 
 /**
- * Handler for the modal submit (when the user clicks "Submit" on the popup).
- * This is where we actually schedule the job using the text they typed.
+ * Modal submit handler:
+ * Reads interval_days, time, text from the modal,
+ * and uses targetChannelId passed via custom_id.
  */
 export async function handleScheduledPostModalSubmit(interaction) {
   const { data, channel_id } = interaction;
   const { custom_id, components } = data;
 
-  // custom_id format: scheduled_post_modal|intervalDays|timeString|targetChannelId
-  if (!custom_id.startsWith("scheduled_post_modal|")) {
+  // custom_id format: scheduled_post_modal|targetChannelId
+  if (!custom_id || !custom_id.startsWith("scheduled_post_modal|")) {
     return {
       type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
       data: {
@@ -321,29 +336,37 @@ export async function handleScheduledPostModalSubmit(interaction) {
     };
   }
 
-  const [, intervalStr, timeString, targetChannelId] = custom_id.split("|");
-  const intervalDays = Number(intervalStr);
+  const [, targetChannelId] = custom_id.split("|");
 
-  // Modal text value is nested: components[0].components[0].value
-  const textInputRow = components[0];
-  const textInput = textInputRow.components[0];
-  const rawText = textInput.value;
+  const intervalDaysStr = getTextInputValue(components, "interval_days_input");
+  const timeString = getTextInputValue(components, "time_input");
+  const rawText = getTextInputValue(components, "scheduled_post_text");
 
-  // Normalize in case you ever type "\n" literally, but real newlines from the modal just work
+  if (intervalDaysStr == null || timeString == null || rawText == null) {
+    console.error("Modal components missing:", { components });
+    return {
+      type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+      data: {
+        flags: InteractionResponseFlags.EPHEMERAL,
+        content:
+          "Something went wrong reading the modal data. Please try again.",
+      },
+    };
+  }
+
   const text = normalizeText(rawText);
 
-  // Validate with real text this time
-  const validationResult = validateOptionValues({
+  const validationResult = validateModalValues({
     text,
-    intervalDays,
+    intervalDaysStr,
     timeString,
   });
 
   if (validationResult && validationResult.type && validationResult.data) {
-    return validationResult;
+    return validationResult; // error response
   }
 
-  const { hour, minute } = validationResult;
+  const { intervalDays, hour, minute } = validationResult;
 
   const { initialDelayMs, intervalMs } = calculateTimings(
     hour,

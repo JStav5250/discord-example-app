@@ -19,19 +19,6 @@ const SCHEDULED_POST_COMMAND = {
   contexts: [0, 1, 2],
   options: [
     {
-      type: 4, // interger
-      name: "interval_days",
-      description: "Number of days between posts",
-      required: true,
-      min_value: 0,
-    },
-    {
-      type: 3, // string
-      name: "time",
-      description: "Time of day (HH:MM 24h, server time)",
-      required: true,
-    },
-    {
       type: 7, // channel
       name: "target_channel",
       description: "Channel where the message will be posted",
